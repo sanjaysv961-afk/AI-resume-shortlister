@@ -162,7 +162,16 @@ public class ResumeShortlisterApp {
                 // 4. Parse AI Response
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode rootNode = mapper.readTree(response.body());
-                String aiText = rootNode.path("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
+
+                String aiText;
+
+                // Safely check if the "candidates" array exists and has at least one item
+                if (rootNode.has("candidates") && rootNode.get("candidates").isArray() && rootNode.get("candidates").size() > 0) {
+                    aiText = rootNode.get("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
+                } else {
+                    // Provide a valid JSON fallback so the mapper.readTree(aiText) below doesn't crash
+                    aiText = "{ \"score\": 0, \"reasoning\": \"Failed to analyze. The document might be an unreadable image-based PDF.\" }";
+                }
 
                 // Clean markdown formatting if AI includes it (e.g. ```json ... ```)
                 aiText = aiText.replaceAll("(?is)^```json\\s*", "").replaceAll("(?is)\\s*```$", "").trim();
