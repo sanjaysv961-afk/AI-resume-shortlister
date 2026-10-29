@@ -140,8 +140,11 @@ public class ResumeShortlisterApp {
                 Tika tika = new Tika();
                 String resumeText = tika.parseToString(stream);
 
+                System.out.println("=== DEBUG: EXTRACTED TEXT ===");
+                System.out.println(resumeText);
+
                 // 2. Build API Request
-                String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
+                String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + apiKey;
                 String prompt = "Act as an expert technical recruiter. Compare this resume to the job description. " +
                         "Return ONLY a JSON object with two keys: 'score' (integer 0-100) and 'reasoning' (2 sentences). " +
                         "Job: " + jobDescription + " | Resume: " + resumeText;
@@ -159,6 +162,9 @@ public class ResumeShortlisterApp {
                 // 3. Call AI
                 HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
+                System.out.println("=== DEBUG: RAW API RESPONSE ===");
+                System.out.println(response.body());
+
                 // 4. Parse AI Response
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode rootNode = mapper.readTree(response.body());
@@ -170,7 +176,7 @@ public class ResumeShortlisterApp {
                     aiText = rootNode.get("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
                 } else {
                     // Provide a valid JSON fallback so the mapper.readTree(aiText) below doesn't crash
-                    aiText = "{ \"score\": 0, \"reasoning\": \"Failed to analyze. The document might be an unreadable image-based PDF.\" }";
+                    aiText = "{ \"score\": 0, \"reasoning\": \"Failed to analyze. The document might be an unreadable image-based PDF or an API error occurred. Check backend logs.\" }";
                 }
 
                 // Clean markdown formatting if AI includes it (e.g. ```json ... ```)
