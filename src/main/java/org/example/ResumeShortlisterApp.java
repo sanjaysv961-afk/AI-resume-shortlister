@@ -9,14 +9,17 @@ import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.util.ArrayList;
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @SpringBootApplication
 @RestController
@@ -131,30 +134,43 @@ public class ResumeShortlisterApp {
             @RequestParam("files") MultipartFile[] files,
             @RequestParam("jobDescription") String jobDescription) {
 
-        List<CandidateResult> results = new ArrayList<>();
-        String apiKey = System.getenv("GEMINI_API_KEY"); // <-- PUT YOUR API KEY HERE
+        String apiKey = System.getenv("GEMINI_API_KEY");
+        ObjectMapper mapper = new ObjectMapper();
 
-        for (MultipartFile file : files) {
-            try (InputStream stream = file.getInputStream()) {
+        List<CandidateResult> results = Arrays.stream(files).parallel().map(file -> {
+            try (InputStream stream = new BufferedInputStream(file.getInputStream())) {
+
                 // 1. Extract Text
                 Tika tika = new Tika();
                 String resumeText = tika.parseToString(stream);
 
-                System.out.println("=== DEBUG: EXTRACTED TEXT ===");
-                System.out.println(resumeText);
+                // TRUNCATE: Limit to first 4000 characters
+                if (resumeText != null && resumeText.length() > 4000) {
+                    resumeText = resumeText.substring(0, 4000);
+                }
 
-                // 2. Build API Request
-                String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + apiKey;
-                String prompt = "Act as an expert technical recruiter. Compare this resume to the job description. " +
+                // 2. Build API Request SAFELY using Jackson
+                // Change "gemini-3.8-flash" to "gemini-1.5-flash"
+                String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + apiKey;
+                String promptText = "Act as an expert technical recruiter. Compare this resume to the job description. " +
                         "Return ONLY a JSON object with two keys: 'score' (integer 0-100) and 'reasoning' (2 sentences). " +
                         "Job: " + jobDescription + " | Resume: " + resumeText;
 
-                String safePrompt = prompt.replace("\"", "\\\"").replace("\n", " ");
-                String requestBody = "{ \"contents\": [{ \"parts\": [{\"text\": \"" + safePrompt + "\"}] }] }";
+                var textNode = mapper.createObjectNode().put("text", promptText);
+                var partsArray = mapper.createArrayNode().add(textNode);
+                var contentNode = mapper.createObjectNode().set("parts", partsArray);
+                var contentsArray = mapper.createArrayNode().add(contentNode);
+                var rootRequestNode = mapper.createObjectNode().set("contents", contentsArray);
+
+                String requestBody = mapper.writeValueAsString(rootRequestNode);
+
+                System.out.println("=== DEBUG: API KEY LOADED === : " + (apiKey != null && !apiKey.isEmpty() ? "YES" : "NO - KEY IS NULL/EMPTY"));
+                System.out.println("=== DEBUG: TARGET URL === : " + url);
 
                 HttpClient client = HttpClient.newHttpClient();
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(60))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
@@ -162,38 +178,35 @@ public class ResumeShortlisterApp {
                 // 3. Call AI
                 HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-                System.out.println("=== DEBUG: RAW API RESPONSE ===");
-                System.out.println(response.body());
+                // --- NEW API RESPONSE DEBUG LINES ---
+                System.out.println("=== DEBUG: API STATUS === : " + response.statusCode());
+                System.out.println("=== DEBUG: RAW RESPONSE === : " + response.body());
+                // ------------------------------------
 
                 // 4. Parse AI Response
-                ObjectMapper mapper = new ObjectMapper();
                 JsonNode rootNode = mapper.readTree(response.body());
-
                 String aiText;
 
-                // Safely check if the "candidates" array exists and has at least one item
                 if (rootNode.has("candidates") && rootNode.get("candidates").isArray() && rootNode.get("candidates").size() > 0) {
                     aiText = rootNode.get("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
                 } else {
-                    // Provide a valid JSON fallback so the mapper.readTree(aiText) below doesn't crash
-                    aiText = "{ \"score\": 0, \"reasoning\": \"Failed to analyze. The document might be an unreadable image-based PDF or an API error occurred. Check backend logs.\" }";
+                    aiText = "{ \"score\": 0, \"reasoning\": \"Failed to analyze. The document might be an unreadable image-based PDF or an API error occurred.\" }";
                 }
 
-                // Clean markdown formatting if AI includes it (e.g. ```json ... ```)
                 aiText = aiText.replaceAll("(?is)^```json\\s*", "").replaceAll("(?is)\\s*```$", "").trim();
-
                 JsonNode resultNode = mapper.readTree(aiText);
-                results.add(new CandidateResult(
+
+                return new CandidateResult(
                         file.getOriginalFilename(),
                         resultNode.path("score").asInt(),
                         resultNode.path("reasoning").asText()
-                ));
+                );
 
             } catch (Exception e) {
                 e.printStackTrace();
-                results.add(new CandidateResult(file.getOriginalFilename(), 0, "Failed to analyze: " + e.getMessage()));
+                return new CandidateResult(file.getOriginalFilename(), 0, "Failed to analyze: " + e.getMessage());
             }
-        }
+        }).collect(Collectors.toList());
 
         // 5. Sort highest score to lowest
         results.sort(Comparator.comparingInt(CandidateResult::getScore).reversed());
